@@ -20,7 +20,7 @@ import requests
 load_dotenv()
 
 # Configuration from environment
-PDF_PATH = os.getenv("PDF_PATH", "/home/mouhcine/Downloads/paper.pdf")
+PDF_PATH = os.getenv("PDF_PATH", "./paper.pdf")
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "mahonzhan/all-MiniLM-L6-v2:latest")
 CHUNKER_TOKENIZER = os.getenv("CHUNKER_TOKENIZER", "sentence-transformers/all-MiniLM-L6-v2")  # HuggingFace tokenizer for chunking
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
