@@ -20,4 +20,4 @@ The system implements a RAG (Retrieval-Augmented Generation) pipeline with the f
 3. **Query Processing**
    - User queries are embedded
    - Context Retriever finds relevant chunks from Milvus
-   - LLM (e.g., Ollama with qet-oss) generates responses based on retrieved context
+   - LLM (e.g., Ollama with gpt-oss) generates responses based on retrieved context
