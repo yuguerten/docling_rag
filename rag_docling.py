@@ -1,9 +1,11 @@
 import os
 import json
+import base64
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import List, Dict, Any
 from datetime import datetime
+from io import BytesIO
 
 from dotenv import load_dotenv
 from docling.document_converter import DocumentConverter
@@ -14,6 +16,7 @@ from docling.chunking import HybridChunker
 from sentence_transformers import SentenceTransformer
 from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
 import requests
+from PIL import Image
 
 
 # Load environment variables
@@ -24,21 +27,24 @@ PDF_PATH = os.getenv("PDF_PATH", "./paper.pdf")
 EMBED_MODEL_ID = os.getenv("EMBED_MODEL_ID", "mahonzhan/all-MiniLM-L6-v2:latest")
 CHUNKER_TOKENIZER = os.getenv("CHUNKER_TOKENIZER", "sentence-transformers/all-MiniLM-L6-v2")  # HuggingFace tokenizer for chunking
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
+VLM_MODEL = os.getenv("VLM_MODEL", "qwen3-vl:8b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 TOP_K = int(os.getenv("TOP_K", "5"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0"))
-QUESTION = "what are the authors of this paper and what is the main idea of the paper?"
+QUESTION = "what are the main authors of this paper and what is the main idea of the paper?"
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./outputs")
+IMAGE_DIR = os.getenv("IMAGE_DIR", "./outputs/images")
 
-# TODO: Add an image extractor then we crop images and save them separately so we can use them to decribe them using a vision-language model.
-def convert_pdf_to_chunks(pdf_path: str, tokenizer: str) -> tuple[List[Dict[str, Any]], Any]:
-    """Convert PDF to chunks using Docling."""
+def convert_pdf_to_chunks(pdf_path: str, tokenizer: str, extract_images: bool = True) -> tuple[List[Dict[str, Any]], Any, List[Dict[str, Any]]]:
+    """Convert PDF to chunks using Docling and extract images."""
     print(f"Processing PDF: {pdf_path}")
     
     # Initialize the document converter with pipeline options
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = False
     pipeline_options.do_table_structure = True
+    pipeline_options.images_scale = 2.0  # Higher resolution for better VLM processing
+    pipeline_options.generate_picture_images = extract_images
     
     converter = DocumentConverter(
         format_options={
@@ -76,7 +82,112 @@ def convert_pdf_to_chunks(pdf_path: str, tokenizer: str) -> tuple[List[Dict[str,
         })
     
     print(f"Created {len(chunks)} chunks")
-    return chunks, result.document
+    
+    # Extract images from the document
+    images_info = []
+    if extract_images and hasattr(result.document, 'pictures'):
+        print(f"Extracting images from document...")
+        for idx, picture in enumerate(result.document.pictures):
+            try:
+                # Get image data
+                if hasattr(picture, 'image') and picture.image:
+                    image_data = picture.image.pil_image
+                    
+                    # Get page number
+                    page_no = 0
+                    if hasattr(picture, 'prov') and picture.prov:
+                        page_no = getattr(picture.prov[0], 'page_no', 0) if picture.prov else 0
+                    
+                    images_info.append({
+                        'index': idx,
+                        'image': image_data,
+                        'page': page_no,
+                        'caption': getattr(picture, 'text', ''),
+                    })
+            except Exception as e:
+                print(f"Error extracting image {idx}: {e}")
+        
+        print(f"Extracted {len(images_info)} images")
+    
+    return chunks, result.document, images_info
+
+
+def image_to_base64(image: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+
+def describe_image_with_vlm(image: Image.Image, model: str = VLM_MODEL, prompt: str = "Describe this image in detail.") -> str:
+    """Describe an image using Ollama VLM."""
+    url = f"{OLLAMA_BASE_URL}/api/generate"
+    
+    # Convert image to base64
+    image_base64 = image_to_base64(image)
+    
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "images": [image_base64],
+        "stream": False
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=120)
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        print(f"Error describing image with VLM: {e}")
+        return f"Error: {str(e)}"
+
+
+def save_images_and_descriptions(images_info: List[Dict[str, Any]], output_dir: str, vlm_model: str = VLM_MODEL) -> List[Dict[str, Any]]:
+    """Save images and generate descriptions using VLM."""
+    if not images_info:
+        return []
+    
+    # Create image directory
+    image_dir = Path(output_dir)
+    image_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\nProcessing {len(images_info)} images with VLM...")
+    
+    image_chunks = []
+    for img_info in images_info:
+        idx = img_info['index']
+        image = img_info['image']
+        page = img_info['page']
+        caption = img_info['caption']
+        
+        # Save image
+        image_path = image_dir / f"image_{idx}_page_{page}.png"
+        image.save(image_path)
+        print(f"Saved image {idx} to {image_path}")
+        
+        # Generate description with VLM
+        print(f"Generating description for image {idx} using {vlm_model}...")
+        description = describe_image_with_vlm(image, vlm_model)
+        print(f"Description for image {idx}: {clip_text(description, 100)}")
+        
+        # Create text chunk with image description
+        text_content = f"[IMAGE {idx} - Page {page}]\n"
+        if caption:
+            text_content += f"Caption: {caption}\n"
+        text_content += f"Description: {description}"
+        
+        image_chunks.append({
+            'text': text_content,
+            'metadata': {
+                'source': str(image_path),
+                'page': page,
+                'type': 'image',
+                'image_index': idx
+            }
+        })
+    
+    print(f"\nGenerated {len(image_chunks)} image description chunks")
+    return image_chunks
 
 
 def get_ollama_embedding(text: str, model: str) -> List[float]:
@@ -313,15 +424,19 @@ def save_rag_results(question: str, answer: str, contexts: List[Dict[str, Any]],
 def main():
     """Main RAG pipeline."""
     print("=" * 80)
-    print("RAG Pipeline with Docling + Ollama")
+    print("RAG Pipeline with Docling + Ollama + VLM")
     print("=" * 80)
     
     # Create output directory
     output_dir = Path(OUTPUT_DIR)
     output_dir.mkdir(exist_ok=True)
     
-    # Step 1: Convert PDF to chunks
-    chunks, document = convert_pdf_to_chunks(PDF_PATH, CHUNKER_TOKENIZER)
+    # Create image directory
+    image_dir = Path(IMAGE_DIR)
+    image_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Step 1: Convert PDF to chunks and extract images
+    chunks, document, images_info = convert_pdf_to_chunks(PDF_PATH, CHUNKER_TOKENIZER)
     
     # Save Docling output
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -332,6 +447,13 @@ def main():
     for i, chunk in enumerate(chunks[:3]):
         print(f"Chunk {i+1}: {clip_text(chunk['text'], 100)}")
     print("...\n")
+    
+    # Step 1.5: Process images with VLM and add to chunks
+    if images_info:
+        image_chunks = save_images_and_descriptions(images_info, str(image_dir), VLM_MODEL)
+        print(f"\nAdding {len(image_chunks)} image description chunks to the corpus")
+        chunks.extend(image_chunks)
+        print(f"Total chunks (text + images): {len(chunks)}")
     
     # Step 2: Create embeddings
     embeddings = create_embeddings(chunks, EMBED_MODEL_ID)

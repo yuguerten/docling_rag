@@ -3,3 +3,4 @@ sentence-transformers
 pymilvus
 python-dotenv
 requests
+Pillow

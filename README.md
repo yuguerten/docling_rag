@@ -9,8 +9,8 @@ The system implements a RAG (Retrieval-Augmented Generation) pipeline with the f
 1. **Document Processing (Docling Runtime)**
    - PDF documents are processed using Docling with multiple backend options (PyPdfium2, OCR, LLM)
    - TableFormer extracts tables in accurate mode
-   - Image Extractor handles embedded images (TODO)
-   - VLM (e.g., Qwen2-VL) generates image descriptions (TODO)
+   - Image Extractor handles embedded images
+   - VLM (e.g., Qwen2-VL) generates image descriptions
    - Output is formatted as Markdown
 
 2. **Embedding & Vector Storage**
