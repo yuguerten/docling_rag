@@ -1,0 +1,5 @@
+docling
+sentence-transformers
+pymilvus
+python-dotenv
+requests
